@@ -81,6 +81,7 @@ library(dplyr)
 library(stringr)
 library(readr)
 library(jsonlite)
+library(tidyr)  # 引入 tidyr 以使用 unnest 展開資料
 
 # 1. 定義病灶與同義詞
 diseases <- list(
@@ -105,9 +106,8 @@ diseases <- list(
 neg_prefix <- "(?:no|without|free of|rules out|ruled out|denies|negative for|unremarkable for|no evidence of)\\s+(?:\\w+\\s+){0,6}"
 neg_suffix <- "\\s+(?:is|was|are)?\\s*(?:ruled out|excluded|negative|absent|unremarkable)"
 
-# 內部輔助函數：解析 Python list 字串並篩選 AP/PA
-filter_ap_pa_elements <- function(row) {
-  # 替換單引號為雙引號以符合 JSON 格式解析
+# 輔助函數：解析 JSON 並僅保留 AP/PA 視角，回傳向量結構 (List Column)
+filter_and_unpack_ap_pa <- function(row) {
   parse_list <- function(str_val) {
     if (is.na(str_val) || str_val == "") return(character(0))
     tryCatch(fromJSON(gsub("'", '"', str_val)), error = function(e) character(0))
@@ -120,18 +120,16 @@ filter_ap_pa_elements <- function(row) {
   
   # 找出 AP 與 PA 的對應索引
   keep_idx <- which(views %in% c("AP", "PA"))
-  
-  # 若長度不一（保護機制），取最小合理長度進行比對
   valid_len <- min(length(views), length(imgs), length(txts), length(augs))
   keep_idx <- keep_idx[keep_idx <= valid_len]
   
-  # 將篩選後的向量重新轉為 JSON 字串
-  row[["image"]]        <- toJSON(imgs[keep_idx])
-  row[["view"]]         <- toJSON(views[keep_idx])
-  row[["text"]]         <- toJSON(txts[keep_idx])
-  row[["text_augment"]] <- toJSON(augs[keep_idx])
-  
-  return(row)
+  # 直接回传向量 list，不轉回 JSON 字串
+  list(
+    image        = imgs[keep_idx],
+    view         = views[keep_idx],
+    text         = txts[keep_idx],
+    text_augment = augs[keep_idx]
+  )
 }
 
 # 3. 封裝處理函數
@@ -139,19 +137,26 @@ process_mimic_df <- function(file_path) {
   # 讀取 CSV
   df <- read.csv(file_path, row.names = 1)
   
-  # 逐列過濾元素，只留 AP / PA 及其對應 text/text_augment
-  df_list <- apply(df, 1, filter_ap_pa_elements)
-  df <- as.data.frame(t(df_list), stringsAsFactors = FALSE)
+  # 逐列解析並過濾 AP/PA
+  parsed_list <- apply(df, 1, filter_and_unpack_ap_pa)
   
-  # 過濾掉過濾後長度為 0 (即 "[]") 的列
-  df <- df %>% filter(image != "[]")
+  # 將解析出的欄位覆蓋回原 data.frame
+  df$image        <- lapply(parsed_list, `[[`, "image")
+  df$view         <- lapply(parsed_list, `[[`, "view")
+  df$text         <- lapply(parsed_list, `[[`, "text")
+  df$text_augment <- lapply(parsed_list, `[[`, "text_augment")
   
-  # 安全處理文字拼接
+  # 將 list 欄位平行展開成獨立的 Row（一個影像路徑對應一個 Row）
+  df <- df %>%
+    unnest(cols = c(image, view, text, text_augment)) %>%
+    filter(!is.na(image) & image != "")
+  
+  # 文字清理與合併
   df <- df %>%
     mutate(
       text_clean = ifelse(is.na(text), "", text),
       text_aug_clean = ifelse(is.na(text_augment), "", text_augment),
-      reports_clean = paste0(text_clean, " ", text_aug_clean)
+      reports_clean = str_trim(paste(text_clean, text_aug_clean))
     )
   
   disease_cols <- names(diseases)
@@ -185,7 +190,7 @@ process_mimic_df <- function(file_path) {
   
   # 整理欄位順序
   target_columns <- c(
-    "subject_id", "image", "view", "AP", "PA", "text", "text_augment", "Finding.Labels",
+    "subject_id", "image", "view", "text", "text_augment", "Finding.Labels",
     "No_Finding", "Atelectasis", "Cardiomegaly", "Consolidation", 
     "Edema", "Effusion", "Emphysema", "Fibrosis", "Hernia", 
     "Infiltration", "Mass", "Nodule", "Pleural_Thickening", 
@@ -200,20 +205,20 @@ process_mimic_df <- function(file_path) {
 # 4. 批次執行 Train 與 Validate 資料集處理
 # ---------------------------------------------------------
 
-train_path <- "C:/Users/Administrator/Desktop/mimic_cxr_aug_train.csv"
-val_path   <- "C:/Users/Administrator/Desktop/mimic_cxr_aug_validate.csv"
+train_path <- "C:/Users/Administrator/Desktop/archive/mimic_cxr_aug_train.csv"
+val_path   <- "C:/Users/Administrator/Desktop/archive/mimic_cxr_aug_validate.csv"
 
 # 處理並儲存 Train
 df_train <- process_mimic_df(train_path)
-write_csv(df_train, "C:/Users/Administrator/Desktop/mimic_cxr_train.csv")
+write_csv(df_train, "C:/Users/Administrator/Desktop/archive/mimic_cxr_train.csv")
 print("Train 資料集處理完畢！")
 
 # 處理並儲存 Validate
 df_val <- process_mimic_df(val_path)
-write_csv(df_val, "C:/Users/Administrator/Desktop/mimic_cxr_validate.csv")
+write_csv(df_val, "C:/Users/Administrator/Desktop/archive/mimic_cxr_validate.csv")
 print("Validate 資料集處理完畢！")
 
 # 合併並儲存 All
 df_all <- rbind(df_train, df_val)
-write_csv(df_all, "C:/Users/Administrator/Desktop/mimic_cxr_aug_all.csv")
-print("全部資料集已合併並儲存至 mimic_cxr_aug_all.csv！")
+write_csv(df_all, "C:/Users/Administrator/Desktop/archive/mimic_cxr_all.csv")
+print("全部資料集已合併並儲存至 mimic_cxr_all.csv！")
