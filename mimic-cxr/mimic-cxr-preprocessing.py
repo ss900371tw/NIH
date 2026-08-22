@@ -77,10 +77,10 @@ write_csv(df_final, "D:/mimic-cxr/mimic_cxr_metadata_processed.csv")
 
 ##########PHYSIONET####################
 # 載入必要套件
-# 載入必要套件
 library(dplyr)
 library(stringr)
 library(readr)
+library(jsonlite)
 
 # 1. 定義病灶與同義詞
 diseases <- list(
@@ -101,16 +101,52 @@ diseases <- list(
   "Tuberculosis"       = "(tuberculosis|tb)"
 )
 
-# 2. 定義否定語意規則 (Prefix & Suffix Negation)
+# 2. 定義否定語意規則
 neg_prefix <- "(?:no|without|free of|rules out|ruled out|denies|negative for|unremarkable for|no evidence of)\\s+(?:\\w+\\s+){0,6}"
 neg_suffix <- "\\s+(?:is|was|are)?\\s*(?:ruled out|excluded|negative|absent|unremarkable)"
+
+# 內部輔助函數：解析 Python list 字串並篩選 AP/PA
+filter_ap_pa_elements <- function(row) {
+  # 替換單引號為雙引號以符合 JSON 格式解析
+  parse_list <- function(str_val) {
+    if (is.na(str_val) || str_val == "") return(character(0))
+    tryCatch(fromJSON(gsub("'", '"', str_val)), error = function(e) character(0))
+  }
+  
+  views <- parse_list(row[["view"]])
+  imgs  <- parse_list(row[["image"]])
+  txts  <- parse_list(row[["text"]])
+  augs  <- parse_list(row[["text_augment"]])
+  
+  # 找出 AP 與 PA 的對應索引
+  keep_idx <- which(views %in% c("AP", "PA"))
+  
+  # 若長度不一（保護機制），取最小合理長度進行比對
+  valid_len <- min(length(views), length(imgs), length(txts), length(augs))
+  keep_idx <- keep_idx[keep_idx <= valid_len]
+  
+  # 將篩選後的向量重新轉為 JSON 字串
+  row[["image"]]        <- toJSON(imgs[keep_idx])
+  row[["view"]]         <- toJSON(views[keep_idx])
+  row[["text"]]         <- toJSON(txts[keep_idx])
+  row[["text_augment"]] <- toJSON(augs[keep_idx])
+  
+  return(row)
+}
 
 # 3. 封裝處理函數
 process_mimic_df <- function(file_path) {
   # 讀取 CSV
   df <- read.csv(file_path, row.names = 1)
   
-  # 安全處理文字拼接：防止 NA 被轉成 "NA" 字串
+  # 逐列過濾元素，只留 AP / PA 及其對應 text/text_augment
+  df_list <- apply(df, 1, filter_ap_pa_elements)
+  df <- as.data.frame(t(df_list), stringsAsFactors = FALSE)
+  
+  # 過濾掉過濾後長度為 0 (即 "[]") 的列
+  df <- df %>% filter(image != "[]")
+  
+  # 安全處理文字拼接
   df <- df %>%
     mutate(
       text_clean = ifelse(is.na(text), "", text),
@@ -118,12 +154,9 @@ process_mimic_df <- function(file_path) {
       reports_clean = paste0(text_clean, " ", text_aug_clean)
     )
   
-  # 過濾 AP 與 PA 欄位不合規的資料
-  df <- df %>% filter(AP != "[]" & PA != "[]")
-  
   disease_cols <- names(diseases)
   
-  # 執行否定比對
+  # 執行否定比對與標籤計算
   for (col_name in disease_cols) {
     keyword <- diseases[[col_name]]
     
@@ -131,7 +164,6 @@ process_mimic_df <- function(file_path) {
     pattern_neg1 <- regex(paste0(neg_prefix, keyword, "\\b"), ignore_case = TRUE)
     pattern_neg2 <- regex(paste0("\\b", keyword, neg_suffix), ignore_case = TRUE)
     
-    # 有提到，且沒有被前置或後置語意否定，才算 1
     df[[col_name]] <- as.integer(
       str_detect(df$reports_clean, pattern_has) & 
         !str_detect(df$reports_clean, pattern_neg1) &
@@ -143,7 +175,7 @@ process_mimic_df <- function(file_path) {
   df <- df %>%
     mutate(No_Finding = as.integer(rowSums(select(., all_of(disease_cols))) == 0))
   
-  # 高效向量化合成 Finding.Labels
+  # 合成 Finding.Labels
   mat <- as.matrix(df[, disease_cols])
   df$Finding.Labels <- apply(mat, 1, function(row) {
     present <- disease_cols[row == 1]
@@ -153,7 +185,7 @@ process_mimic_df <- function(file_path) {
   
   # 整理欄位順序
   target_columns <- c(
-    "subject_id", "AP", "PA", "text", "text_augment", "Finding.Labels",
+    "subject_id", "image", "view", "AP", "PA", "text", "text_augment", "Finding.Labels",
     "No_Finding", "Atelectasis", "Cardiomegaly", "Consolidation", 
     "Edema", "Effusion", "Emphysema", "Fibrosis", "Hernia", 
     "Infiltration", "Mass", "Nodule", "Pleural_Thickening", 
@@ -173,12 +205,12 @@ val_path   <- "C:/Users/Administrator/Desktop/mimic_cxr_aug_validate.csv"
 
 # 處理並儲存 Train
 df_train <- process_mimic_df(train_path)
-write_csv(df_train, train_path)
+write_csv(df_train, "C:/Users/Administrator/Desktop/mimic_cxr_train.csv")
 print("Train 資料集處理完畢！")
 
 # 處理並儲存 Validate
 df_val <- process_mimic_df(val_path)
-write_csv(df_val, val_path)
+write_csv(df_val, "C:/Users/Administrator/Desktop/mimic_cxr_validate.csv")
 print("Validate 資料集處理完畢！")
 
 # 合併並儲存 All
