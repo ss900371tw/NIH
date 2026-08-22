@@ -30,6 +30,8 @@ df_processed <- df %>%
   select(-row_id) %>%                                     # 4. 移除暫存 ID
   relocate(all_of(target_labels), .after = last_col())    # 5. 將疾病欄位依照指定順序移到資料集最後方
 
+colnames(df_processed)[colnames(df_processed)=="No Finding"]<-"No_Finding"
+
 # 寫入新檔案
 write.csv(df_processed, "D:/archive/Data_Entry_2017_processed.csv", row.names = FALSE)
 
