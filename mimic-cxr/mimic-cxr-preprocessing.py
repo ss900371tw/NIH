@@ -106,7 +106,7 @@ diseases <- list(
 neg_prefix <- "(?:no|without|free of|rules out|ruled out|denies|negative for|unremarkable for|no evidence of)\\s+(?:\\w+\\s+){0,6}"
 neg_suffix <- "\\s+(?:is|was|are)?\\s*(?:ruled out|excluded|negative|absent|unremarkable)"
 
-# 輔助 JSON 解析函數
+# JSON 解析輔助函數
 parse_json_list <- function(str_val) {
   if (is.na(str_val) || str_val == "" || str_val == "[]") return(character(0))
   tryCatch(
@@ -115,35 +115,42 @@ parse_json_list <- function(str_val) {
   )
 }
 
-# 輔助函數：利用 AP / PA 欄位提取正確的路徑與相對應索引的文本
+# 輔助函數：以 Study ID 匹配 AP/PA 圖片與文字報告
 filter_and_unpack_ap_pa <- function(row) {
   all_imgs <- parse_json_list(row[["image"]])
   txts     <- parse_json_list(row[["text"]])
   augs     <- parse_json_list(row[["text_augment"]])
   
-  ap_imgs <- parse_json_list(row[["AP"]])
-  pa_imgs <- parse_json_list(row[["PA"]])
+  ap_imgs  <- parse_json_list(row[["AP"]])
+  pa_imgs  <- parse_json_list(row[["PA"]])
   
-  # 組合所有符合 AP/PA 的路徑與對應 view
   selected_imgs  <- c(ap_imgs, pa_imgs)
   selected_views <- c(rep("AP", length(ap_imgs)), rep("PA", length(pa_imgs)))
   
-  if (length(selected_imgs) == 0) {
+  if (length(selected_imgs) == 0 || length(all_imgs) == 0) {
     return(list(image = character(0), view = character(0), text = character(0), text_augment = character(0)))
   }
   
-  # 比對路徑在原始 image 中的 Index，確保抓到對應的 text 與 text_augment
-  img_indices <- match(selected_imgs, all_imgs)
+  # 提取所有圖片的路徑中的 Study ID (格式如 s50084553)
+  all_studies <- str_extract(all_imgs, "s\\d+")
   
-  # 提取對應文字（保護索引越界與 NA）
+  # 找出獨特的 Study ID List，以對應 text / text_augment 的 Index
+  unique_studies <- unique(all_studies[!is.na(all_studies)])
+  
+  # 抓取選定的 AP/PA 圖片對應的 Study ID
+  selected_studies <- str_extract(selected_imgs, "s\\d+")
+  
+  # 比對該圖片屬於第幾個 Study，並抓取該 Study 的文字報告
+  study_indices <- match(selected_studies, unique_studies)
+  
   get_at_idx <- function(vec, idxs) {
     sapply(idxs, function(i) {
       if (!is.na(i) && i >= 1 && i <= length(vec)) vec[i] else ""
     })
   }
   
-  selected_txts <- get_at_idx(txts, img_indices)
-  selected_augs <- get_at_idx(augs, img_indices)
+  selected_txts <- get_at_idx(txts, study_indices)
+  selected_augs <- get_at_idx(augs, study_indices)
   
   list(
     image        = selected_imgs,
@@ -155,19 +162,17 @@ filter_and_unpack_ap_pa <- function(row) {
 
 # 3. 封裝主處理函數
 process_mimic_df <- function(file_path) {
-  # 讀取 CSV
   df <- read.csv(file_path, row.names = 1, stringsAsFactors = FALSE)
   
-  # 逐列解析 AP/PA 圖片與對應報告
+  # 逐列解析 AP/PA 圖片並精確匹配 Study 文字
   parsed_list <- apply(df, 1, filter_and_unpack_ap_pa)
   
-  # 覆蓋 List Column
   df$image        <- lapply(parsed_list, `[[`, "image")
   df$view         <- lapply(parsed_list, `[[`, "view")
   df$text         <- lapply(parsed_list, `[[`, "text")
   df$text_augment <- lapply(parsed_list, `[[`, "text_augment")
   
-  # 平行展開成一列一個影像檔路徑
+  # 展開資料
   df <- df %>%
     unnest(cols = c(image, view, text, text_augment)) %>%
     filter(!is.na(image) & image != "")
@@ -182,7 +187,7 @@ process_mimic_df <- function(file_path) {
   
   disease_cols <- names(diseases)
   
-  # 執行否定比對與標籤計算
+  # 正則否定詞比對
   for (col_name in disease_cols) {
     keyword <- diseases[[col_name]]
     
@@ -197,11 +202,10 @@ process_mimic_df <- function(file_path) {
     )
   }
   
-  # 計算 No_Finding
+  # 計算 No_Finding 與 Finding.Labels
   df <- df %>%
     mutate(No_Finding = as.integer(rowSums(select(., all_of(disease_cols))) == 0))
   
-  # 合成 Finding.Labels
   mat <- as.matrix(df[, disease_cols])
   df$Finding.Labels <- apply(mat, 1, function(row) {
     present <- disease_cols[row == 1]
@@ -209,7 +213,7 @@ process_mimic_df <- function(file_path) {
     return(paste(present, collapse = "|"))
   })
   
-  # 整理最終欄位
+  # 選擇目標欄位
   target_columns <- c(
     "subject_id", "image", "view", "text", "text_augment", "Finding.Labels",
     "No_Finding", "Atelectasis", "Cardiomegaly", "Consolidation", 
@@ -223,23 +227,20 @@ process_mimic_df <- function(file_path) {
 }
 
 # ---------------------------------------------------------
-# 4. 批次執行 Train 與 Validate 資料集處理
+# 4. 執行與輸出 CSV
 # ---------------------------------------------------------
 
 train_path <- "C:/Users/Administrator/Desktop/archive/mimic_cxr_aug_train.csv"
 val_path   <- "C:/Users/Administrator/Desktop/archive/mimic_cxr_aug_validate.csv"
 
-# 處理並儲存 Train
 df_train <- process_mimic_df(train_path)
 write_csv(df_train, "C:/Users/Administrator/Desktop/archive/mimic_cxr_train.csv")
 print("Train 資料集處理完畢！")
 
-# 處理並儲存 Validate
 df_val <- process_mimic_df(val_path)
 write_csv(df_val, "C:/Users/Administrator/Desktop/archive/mimic_cxr_validate.csv")
 print("Validate 資料集處理完畢！")
 
-# 合併並儲存 All
 df_all <- rbind(df_train, df_val)
 write_csv(df_all, "C:/Users/Administrator/Desktop/archive/mimic_cxr_all.csv")
 print("全部資料集已合併並儲存至 mimic_cxr_all.csv！")
