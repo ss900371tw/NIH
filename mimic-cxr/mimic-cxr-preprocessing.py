@@ -106,13 +106,28 @@ diseases <- list(
 neg_prefix <- "(?:no|without|free of|rules out|ruled out|denies|negative for|unremarkable for|no evidence of)\\s+(?:\\w+\\s+){0,6}"
 neg_suffix <- "\\s+(?:is|was|are)?\\s*(?:ruled out|excluded|negative|absent|unremarkable)"
 
-# JSON 解析輔助函數
+# 增強型文字 Parsing 函數：可完美支援 "..." 與 '...' 混合及 patient's 撇號
 parse_json_list <- function(str_val) {
   if (is.na(str_val) || str_val == "" || str_val == "[]") return(character(0))
-  tryCatch(
-    fromJSON(gsub("'", '"', str_val)), 
-    error = function(e) character(0)
-  )
+  
+  # 嘗試 1：標準 jsonlite 解析 (若為正規 JSON)
+  res <- tryCatch(fromJSON(str_val), error = function(e) NULL)
+  if (!is.null(res) && is.character(res)) return(res)
+  
+  # 嘗試 2：使用 PCRE 正則表達式精確擷取 "..." 或 '...' 包覆的完整區塊
+  # 匹配模式： "(非引號或轉義)*" OR '(非引號或轉義)*'
+  pattern <- '("(?:[^"\\\\]|\\\\.)*"|\'(?:[^\'\\\\]|\\\\.)*\')'
+  matches <- str_extract_all(str_val, regex(pattern, dotall = TRUE))[[1]]
+  
+  if (length(matches) > 0) {
+    # 移除首尾引號
+    clean_matches <- str_sub(matches, 2, -2)
+    # 還原轉義字串 (例如 \' 或 \")
+    clean_matches <- str_replace_all(clean_matches, "\\\\(['\"])", "\\1")
+    return(clean_matches)
+  }
+  
+  return(character(0))
 }
 
 # 輔助函數：以 Study ID 匹配 AP/PA 圖片與文字報告
@@ -131,13 +146,13 @@ filter_and_unpack_ap_pa <- function(row) {
     return(list(image = character(0), view = character(0), text = character(0), text_augment = character(0)))
   }
   
-  # 提取所有圖片的路徑中的 Study ID (格式如 s50084553)
+  # 提取所有圖片路徑中的 Study ID (例如 s50084553)
   all_studies <- str_extract(all_imgs, "s\\d+")
   
-  # 找出獨特的 Study ID List，以對應 text / text_augment 的 Index
+  # 找出獨特的 Study ID 列表，對應 text / text_augment 的 Index
   unique_studies <- unique(all_studies[!is.na(all_studies)])
   
-  # 抓取選定的 AP/PA 圖片對應的 Study ID
+  # 抓取選定 AP/PA 圖片對應的 Study ID
   selected_studies <- str_extract(selected_imgs, "s\\d+")
   
   # 比對該圖片屬於第幾個 Study，並抓取該 Study 的文字報告
@@ -164,7 +179,7 @@ filter_and_unpack_ap_pa <- function(row) {
 process_mimic_df <- function(file_path) {
   df <- read.csv(file_path, row.names = 1, stringsAsFactors = FALSE)
   
-  # 逐列解析 AP/PA 圖片並精確匹配 Study 文字
+  # 逐列解析 AP/PA 圖片與對應報告
   parsed_list <- apply(df, 1, filter_and_unpack_ap_pa)
   
   df$image        <- lapply(parsed_list, `[[`, "image")
