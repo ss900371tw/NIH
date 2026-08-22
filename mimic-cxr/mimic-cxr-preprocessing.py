@@ -81,7 +81,7 @@ library(dplyr)
 library(stringr)
 library(readr)
 library(jsonlite)
-library(tidyr)  # 引入 tidyr 以使用 unnest 展開資料
+library(tidyr)
 
 # 1. 定義病灶與同義詞
 diseases <- list(
@@ -106,47 +106,68 @@ diseases <- list(
 neg_prefix <- "(?:no|without|free of|rules out|ruled out|denies|negative for|unremarkable for|no evidence of)\\s+(?:\\w+\\s+){0,6}"
 neg_suffix <- "\\s+(?:is|was|are)?\\s*(?:ruled out|excluded|negative|absent|unremarkable)"
 
-# 輔助函數：解析 JSON 並僅保留 AP/PA 視角，回傳向量結構 (List Column)
-filter_and_unpack_ap_pa <- function(row) {
-  parse_list <- function(str_val) {
-    if (is.na(str_val) || str_val == "") return(character(0))
-    tryCatch(fromJSON(gsub("'", '"', str_val)), error = function(e) character(0))
-  }
-  
-  views <- parse_list(row[["view"]])
-  imgs  <- parse_list(row[["image"]])
-  txts  <- parse_list(row[["text"]])
-  augs  <- parse_list(row[["text_augment"]])
-  
-  # 找出 AP 與 PA 的對應索引
-  keep_idx <- which(views %in% c("AP", "PA"))
-  valid_len <- min(length(views), length(imgs), length(txts), length(augs))
-  keep_idx <- keep_idx[keep_idx <= valid_len]
-  
-  # 直接回传向量 list，不轉回 JSON 字串
-  list(
-    image        = imgs[keep_idx],
-    view         = views[keep_idx],
-    text         = txts[keep_idx],
-    text_augment = augs[keep_idx]
+# 輔助 JSON 解析函數
+parse_json_list <- function(str_val) {
+  if (is.na(str_val) || str_val == "" || str_val == "[]") return(character(0))
+  tryCatch(
+    fromJSON(gsub("'", '"', str_val)), 
+    error = function(e) character(0)
   )
 }
 
-# 3. 封裝處理函數
+# 輔助函數：利用 AP / PA 欄位提取正確的路徑與相對應索引的文本
+filter_and_unpack_ap_pa <- function(row) {
+  all_imgs <- parse_json_list(row[["image"]])
+  txts     <- parse_json_list(row[["text"]])
+  augs     <- parse_json_list(row[["text_augment"]])
+  
+  ap_imgs <- parse_json_list(row[["AP"]])
+  pa_imgs <- parse_json_list(row[["PA"]])
+  
+  # 組合所有符合 AP/PA 的路徑與對應 view
+  selected_imgs  <- c(ap_imgs, pa_imgs)
+  selected_views <- c(rep("AP", length(ap_imgs)), rep("PA", length(pa_imgs)))
+  
+  if (length(selected_imgs) == 0) {
+    return(list(image = character(0), view = character(0), text = character(0), text_augment = character(0)))
+  }
+  
+  # 比對路徑在原始 image 中的 Index，確保抓到對應的 text 與 text_augment
+  img_indices <- match(selected_imgs, all_imgs)
+  
+  # 提取對應文字（保護索引越界與 NA）
+  get_at_idx <- function(vec, idxs) {
+    sapply(idxs, function(i) {
+      if (!is.na(i) && i >= 1 && i <= length(vec)) vec[i] else ""
+    })
+  }
+  
+  selected_txts <- get_at_idx(txts, img_indices)
+  selected_augs <- get_at_idx(augs, img_indices)
+  
+  list(
+    image        = selected_imgs,
+    view         = selected_views,
+    text         = selected_txts,
+    text_augment = selected_augs
+  )
+}
+
+# 3. 封裝主處理函數
 process_mimic_df <- function(file_path) {
   # 讀取 CSV
-  df <- read.csv(file_path, row.names = 1)
+  df <- read.csv(file_path, row.names = 1, stringsAsFactors = FALSE)
   
-  # 逐列解析並過濾 AP/PA
+  # 逐列解析 AP/PA 圖片與對應報告
   parsed_list <- apply(df, 1, filter_and_unpack_ap_pa)
   
-  # 將解析出的欄位覆蓋回原 data.frame
+  # 覆蓋 List Column
   df$image        <- lapply(parsed_list, `[[`, "image")
   df$view         <- lapply(parsed_list, `[[`, "view")
   df$text         <- lapply(parsed_list, `[[`, "text")
   df$text_augment <- lapply(parsed_list, `[[`, "text_augment")
   
-  # 將 list 欄位平行展開成獨立的 Row（一個影像路徑對應一個 Row）
+  # 平行展開成一列一個影像檔路徑
   df <- df %>%
     unnest(cols = c(image, view, text, text_augment)) %>%
     filter(!is.na(image) & image != "")
@@ -188,7 +209,7 @@ process_mimic_df <- function(file_path) {
     return(paste(present, collapse = "|"))
   })
   
-  # 整理欄位順序
+  # 整理最終欄位
   target_columns <- c(
     "subject_id", "image", "view", "text", "text_augment", "Finding.Labels",
     "No_Finding", "Atelectasis", "Cardiomegaly", "Consolidation", 
