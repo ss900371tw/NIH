@@ -1,3 +1,4 @@
+######### HUGGINGFACE ###########
 import os
 import io
 import pandas as pd
@@ -72,3 +73,85 @@ def extract_parquet_data(data_dir, output_img_dir, output_csv_path):
 
 if __name__ == "__main__":
     extract_parquet_data(DATA_DIR, OUTPUT_IMG_DIR, OUTPUT_CSV_PATH)
+
+
+
+########### PHYSIONET ###############
+
+import os
+import re
+import shutil
+import pandas as pd
+
+# ==================== 1. 設定路徑 ====================
+csv_path = r"C:\Users\Administrator\Desktop\archive\mimic_cxr_all.csv"
+output_csv_path = (
+    r"C:\Users\Administrator\Desktop\archive\mimic_cxr_all_updated.csv"
+)
+target_dir = r"C:\Users\Administrator\Desktop\archive\images"
+
+# 【重點修改這裡】請改為包含 files 資料夾的真實上一級目錄
+# 例如：如果您的 files 資料夾在 C:\Users\Administrator\Desktop\archive\files
+# 這裡就要設定為 r"C:\Users\Administrator\Desktop\archive"
+# 如果在其他磁碟機，請改為對應路徑，例如 r"D:\MIMIC_CXR_DATA"
+source_base_dir = r"C:\Users\Administrator\Desktop\archive\official_data_iccv_final"
+
+os.makedirs(target_dir, exist_ok=True)
+
+# ==================== 2. 讀取 CSV 檔案 ====================
+print("讀取 CSV 檔中...")
+df = pd.read_csv(csv_path)
+
+path_columns = ["image", "AP", "PA"]
+path_pattern = re.compile(r"files/[^\'\"]+\.jpg")
+
+# ==================== 3. 複製圖片到 images 資料夾 ====================
+print("開始複製圖片...")
+success_count = 0
+fail_count = 0
+copied_files = set()
+
+for col in path_columns:
+    if col in df.columns:
+        for cell in df[col].dropna():
+            matches = path_pattern.findall(str(cell))
+            for rel_path in matches:
+                if rel_path in copied_files:
+                    continue
+
+                # 組合絕對路徑
+                src_path = os.path.join(source_base_dir, rel_path)
+                filename = os.path.basename(rel_path)
+                dest_path = os.path.join(target_dir, filename)
+
+                if os.path.exists(src_path):
+                    try:
+                        shutil.copy2(src_path, dest_path)
+                        success_count += 1
+                        copied_files.add(rel_path)
+                    except Exception as e:
+                        print(f"複製失敗 [{src_path}]: {e}")
+                        fail_count += 1
+                else:
+                    fail_count += 1
+
+print(
+    f"圖片複製完成！成功複製: {success_count} 個，失敗/未找到: {fail_count} 個。\n"
+)
+
+# ==================== 4. 修改 CSV 欄位的路徑文字 ====================
+print("開始更新 CSV 裡的路徑文字...")
+
+
+def update_path_string(text):
+    if pd.isna(text):
+        return text
+    return re.sub(r"files/[^\'\"]+/([^/\'\"]+\.jpg)", r"images/\1", str(text))
+
+
+for col in path_columns:
+    if col in df.columns:
+        df[col] = df[col].apply(update_path_string)
+
+df.to_csv(output_csv_path, index=False, encoding="utf-8-sig")
+print(f"CSV 更新完成！已儲存至: {output_csv_path}")
