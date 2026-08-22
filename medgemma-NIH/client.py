@@ -136,8 +136,29 @@ SITE_PATHS_MAPPING = {
 
 current_cached_site = None 
 
+# 🌟 新增：專門依據當前 Round 動態生成 Training Dataset
+def update_train_dataset_for_round(site_name, current_round):
+    global shared_train_dataset
+    from .task import prepare_vqa_dataset
+    
+    base_dir = SITE_PATHS_MAPPING.get(site_name, f"/opt/toolkit/NIH/{site_name}/")
+    train_csv_path = os.path.join(base_dir, "train.csv")
+    train_images_dir = os.path.join(base_dir, "images")
+    
+    # 動態 Seed 計算：每增加一輪，Seed +1 (例如 Round 1: 3405, Round 2: 3406...)
+    dynamic_seed = 3405 + (current_round - 1)
+    print(f"🔄 [{site_name}] 正在為 Round {current_round} 生成動態訓練集 (Seed: {dynamic_seed})...")
+    
+    shared_train_dataset = prepare_vqa_dataset(
+        train_csv_path, 
+        train_images_dir, 
+        3000, 
+        is_train=True, 
+        current_seed=dynamic_seed
+    )
+
 def load_resources_once(site_name="site-1"):
-    global shared_model, shared_processor, shared_train_dataset, shared_test_dataset, current_cached_site
+    global shared_model, shared_processor, shared_test_dataset, current_cached_site
     
     if not torch.cuda.is_available() or torch.cuda.device_count() == 0:
         cuda_env = os.environ.get("CUDA_VISIBLE_DEVICES", "Not Set")
@@ -156,21 +177,16 @@ def load_resources_once(site_name="site-1"):
             print(f"❌ [{site_name}] GPU 模型初始化失敗: {gpu_err}")
             raise gpu_err
 
-    if shared_train_dataset is None or current_cached_site != site_name:
-        print(f"📂 [{site_name}] 正在載入該站點專屬的 VQA 數據集...")
+    # 🌟 測試集維持只載入與快取一次（評估基準固定）
+    if shared_test_dataset is None or current_cached_site != site_name:
+        print(f"📂 [{site_name}] 正在載入該站點專屬的測試數據集 (固定 Seed)...")
         from .task import prepare_vqa_dataset
         
-        default_fallback_path = f"/opt/toolkit/NIH/{site_name}/"
-        base_dir = SITE_PATHS_MAPPING.get(site_name, default_fallback_path)
-        
-        train_csv_path = os.path.join(base_dir, "train.csv")
+        base_dir = SITE_PATHS_MAPPING.get(site_name, f"/opt/toolkit/NIH/{site_name}/")
         test_csv_path = os.path.join(base_dir, "test.csv")
-        train_images_dir = os.path.join(base_dir, "images")
         test_images_dir = os.path.join(base_dir, "images")
         
-        shared_train_dataset = prepare_vqa_dataset(train_csv_path, train_images_dir, 3000, is_train=True)
         shared_test_dataset = prepare_vqa_dataset(test_csv_path, test_images_dir, 500, is_train=False)
-        
         current_cached_site = site_name
 
 def start_client_monitor_safely(current_round, initial_status="TRAINING"):
@@ -233,8 +249,11 @@ class FlowerClient(NumPyClient):
         def async_train_worker():
             gpu_lock = acquire_gpu_lock()
             try:
-                print(f"📦 [{self.site_name}] 收到來自 Server 的訓練指令，開始安全準備 VQA 數據與模型...")
+                print(f"📦 [{self.site_name}] 收到來自 Server 的 Round {current_round} 訓練指令...")
                 load_resources_once(self.site_name)
+                
+                # 🌟 關鍵修訂：每回合開始微調前，呼叫動態重新抽樣訓練集
+                update_train_dataset_for_round(self.site_name, current_round)
                 
                 from .task import set_weights, train_local, get_weights
                 set_weights(shared_model, parameters)
@@ -278,6 +297,10 @@ class FlowerClient(NumPyClient):
                     formatted_metrics[k] = v.item()
 
         train_size = len(shared_train_dataset) if shared_train_dataset is not None else 0
+
+        if train_size == 0:
+            clear_global_model()
+            raise RuntimeError(f"❌ [{self.site_name}] 本地訓練數據集中沒有任何可用的圖片/樣本！")
 
         if monitor_thread and monitor_thread.is_alive():
             monitor_thread.update_status("IDLE", connected=True, current_round=current_round)
