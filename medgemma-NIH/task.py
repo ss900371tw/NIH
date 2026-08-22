@@ -82,14 +82,13 @@ def create_model_and_tokenizer():
     return model, processor
 
 # task.py
-def prepare_vqa_dataset(csv_path, image_root, num, is_train=True):
+def prepare_vqa_dataset(csv_path, image_root, num, is_train=True, current_seed=None):
     if not os.path.exists(csv_path):
         print(f"⚠️ 找不到 CSV 檔案: {csv_path}，返回空清單。")
         return []
 
     df = pd.read_csv(csv_path)
 
-    # 🌟 補上帶句點與底線的欄位命名 (例如 'Image.Index')
     possible_img_cols = [
         'Image.Index', 'Image Index', 'Image_Index', 'image_id', 
         'filename', 'file_name', 'image', 'Image', 'path', 'img'
@@ -117,7 +116,10 @@ def prepare_vqa_dataset(csv_path, image_root, num, is_train=True):
     df_healthy = df[df['No_Finding'] == 1]
     df_abnormal = df[df['No_Finding'] == 0]
     
-    local_random = random.Random(seed)
+    # 🌟 決定當前抽樣使用的 Seed：測試集固定使用全域 seed，訓練集使用傳入的 current_seed
+    sampling_seed = seed if (not is_train or current_seed is None) else current_seed
+
+    local_random = random.Random(sampling_seed)
     abnormal_ratio = local_random.uniform(0.65, 0.7)
     
     n_healthy_target = min(int(total_requested * (1 - abnormal_ratio)), len(df_healthy))
@@ -125,15 +127,18 @@ def prepare_vqa_dataset(csv_path, image_root, num, is_train=True):
     n_healthy_target = min(total_requested - n_abnormal_target, len(df_healthy))
 
     if not is_train:
-        print(f"\n🧪 [測試/驗證集] 按比例抽取: 健康 {n_healthy_target} 筆, 異常 {n_abnormal_target} 筆")
+        # 🧪 測試/驗證集：固定使用 seed 抽樣，確保跨回合評估基準一致
+        print(f"\n🧪 [測試/驗證集] 按比例抽取 (固定 Seed: {seed}): 健康 {n_healthy_target} 筆, 異常 {n_abnormal_target} 筆")
         final_healthy = df_healthy.sample(n=n_healthy_target, random_state=seed) if n_healthy_target > 0 else pd.DataFrame()
         final_abnormal = df_abnormal.sample(n=n_abnormal_target, random_state=seed) if n_abnormal_target > 0 else pd.DataFrame()
         df_balanced = pd.concat([final_healthy, final_abnormal]).sample(frac=1, random_state=seed).reset_index(drop=True)
     else:
+        # 🏋️ 訓練集：使用動態 sampling_seed 抽樣，確保每輪抽取的資料集均不同
+        print(f"\n🏋️ [訓練集 - Round 動態抽樣] 使用動態 Seed: {sampling_seed}")
         guaranteed_abnormal_indices = set()
         disease_labels = [l for l in target_labels if l in df.columns and l != "No_Finding"]
 
-        print("\n🌊 [異常組 - 階段 1] 開始執行『多標籤池』隨機依序提取...")
+        print("🌊 [異常組 - 階段 1] 開始執行『多標籤池』隨機依序提取...")
         while True:
             still_needed_abnormal = n_abnormal_target - len(guaranteed_abnormal_indices)
             if still_needed_abnormal <= 0:
@@ -159,7 +164,7 @@ def prepare_vqa_dataset(csv_path, image_root, num, is_train=True):
             if total_available_multi <= still_needed_abnormal:
                 guaranteed_abnormal_indices.update(df_class_positive_multi.index.tolist())
             else:
-                sampled_seeds = df_class_positive_multi.sample(n=still_needed_abnormal, random_state=seed)
+                sampled_seeds = df_class_positive_multi.sample(n=still_needed_abnormal, random_state=sampling_seed)
                 guaranteed_abnormal_indices.update(sampled_seeds.index.tolist())
 
         still_needed_abnormal = n_abnormal_target - len(guaranteed_abnormal_indices)
@@ -172,23 +177,23 @@ def prepare_vqa_dataset(csv_path, image_root, num, is_train=True):
                 
                 if total_available_single > 0:
                     draw_num = min(still_needed_abnormal, total_available_single)
-                    sampled_seeds = df_single_label_pool.sample(n=draw_num, random_state=seed)
+                    sampled_seeds = df_single_label_pool.sample(n=draw_num, random_state=sampling_seed)
                     guaranteed_abnormal_indices.update(sampled_seeds.index.tolist())
 
         still_needed_abnormal = n_abnormal_target - len(guaranteed_abnormal_indices)
         if still_needed_abnormal > 0:
             df_remaining_abnormal = df_abnormal[~df_abnormal.index.isin(guaranteed_abnormal_indices)]
             if not df_remaining_abnormal.empty:
-                sampled_backup = df_remaining_abnormal.sample(n=min(still_needed_abnormal, len(df_remaining_abnormal)), random_state=seed)
+                sampled_backup = df_remaining_abnormal.sample(n=min(still_needed_abnormal, len(df_remaining_abnormal)), random_state=sampling_seed)
                 guaranteed_abnormal_indices.update(sampled_backup.index.tolist())
 
         final_abnormal = df_abnormal.loc[list(guaranteed_abnormal_indices)]
 
         if n_healthy_target > 0 and len(df_healthy) > 0:
-            final_healthy = df_healthy.sample(n=n_healthy_target, random_state=seed)
-            df_balanced = pd.concat([final_abnormal, final_healthy]).sample(frac=1, random_state=seed).reset_index(drop=True)
+            final_healthy = df_healthy.sample(n=n_healthy_target, random_state=sampling_seed)
+            df_balanced = pd.concat([final_abnormal, final_healthy]).sample(frac=1, random_state=sampling_seed).reset_index(drop=True)
         else:
-            df_balanced = final_abnormal.sample(frac=1, random_state=seed).reset_index(drop=True)
+            df_balanced = final_abnormal.sample(frac=1, random_state=sampling_seed).reset_index(drop=True)
 
     print("\n📊 —— 當前站點 Local 資料集各標籤分佈陽性個數 ——")
     for label in target_labels:
@@ -207,7 +212,6 @@ def prepare_vqa_dataset(csv_path, image_root, num, is_train=True):
     for _, row in tqdm(df_balanced.iterrows(), total=len(df_balanced), desc="Processing Dataset"):
         instruction = "Review this chest radiograph and provide the clinical impressions based on the visible findings."
         
-        # 🌟 自動相容 Finding.Labels 與 answer
         raw_label = "No Finding"
         if 'answer' in row:
             raw_label = str(row['answer']).strip()
