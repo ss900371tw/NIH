@@ -193,7 +193,7 @@ def prepare_vqa_dataset(csv_path, image_root, num, is_train=True, current_seed=N
             if available_count <= still_needed:
                 # 該稀有疾病樣本數 <= 剩餘名額 -> 全抽
                 guaranteed_abnormal_indices.update(df_min_label_samples.index.tolist())
-                print(f"  └ 稀有標籤 [{min_label}] (多疾病數={min_label_multi_count} < 100 -> 來源: {pool_type_str}, 可用 {available_count} 筆) -> 全抽，累積異常: {len(guaranteed_abnormal_indices)}/{n_abnormal_target}")
+                print(f"  └ 稀有標籤 [{min_label}] (多疾病數={min_label_multi_count} -> 來源: {pool_type_str}, 可用 {available_count} 筆) -> 全抽，累積異常: {len(guaranteed_abnormal_indices)}/{n_abnormal_target}")
             else:
                 # 該稀有疾病樣本數 > 剩餘名額 -> 隨機抽樣補滿並結束
                 sampled = df_min_label_samples.sample(n=still_needed, random_state=sampling_seed)
