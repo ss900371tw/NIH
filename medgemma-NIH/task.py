@@ -135,8 +135,8 @@ def prepare_vqa_dataset(csv_path, image_root, num, is_train=True, current_seed=N
     if not is_train:
         # 🧪 測試/驗證集：固定使用 seed 抽樣
         print(f"\n🧪 [測試/驗證集] 按比例抽取 (固定 Seed: {seed}): 健康 {n_healthy_target} 筆, 異常 {n_abnormal_target} 筆")
-        final_healthy = df_healthy.sample(n=n_healthy_target, random_state=seed) if n_healthy_target > 0 else pd.DataFrame()
-        final_abnormal = df_abnormal.sample(n=n_abnormal_target, random_state=seed) if n_abnormal_target > 0 else pd.DataFrame()
+        final_healthy = df_healthy.sample(n=int(total_requested * 0.5), random_state=seed) if n_healthy_target > 0 else pd.DataFrame()
+        final_abnormal = df_abnormal.sample(n=int(total_requested * (1 - 0.5)), random_state=seed) if n_abnormal_target > 0 else pd.DataFrame()
         df_balanced = pd.concat([final_healthy, final_abnormal]).sample(frac=1, random_state=seed).reset_index(drop=True)
     else:
         # 🏋️ 訓練集：使用稀有疾病優先的多疾病與單一疾病分層抽樣（含小於 100 筆全域放寬條件）
