@@ -237,3 +237,173 @@ write.csv(
   filtered_data, 
   "C:/Users/USER/Downloads/PADCHEST_chest_x_ray_images_labels_160K_01.02.19.csv/PADCHEST.csv"
 )
+
+
+
+
+# =====================DATA DISTRIBUTION=====================
+import os
+import shutil
+import csv
+import random
+
+# ================= 參數設定 =================
+
+# 1. 來源圖片資料夾路徑
+source_dirs = [
+    r"C:\Users\USER\Downloads\archive\images",
+]
+
+# 2. 目標圖片資料夾路徑 (各站點的 images 資料夾)
+target_dirs = [
+    r"C:\Users\USER\Downloads\archive\site-1\images",
+    r"C:\Users\USER\Downloads\archive\site-2\images",
+    r"C:\Users\USER\Downloads\archive\site-3\images",
+]
+
+# 3. 原始標籤 CSV 總表路徑
+MASTER_CSV = r"C:\Users\USER\Downloads\archive\PADCHEST.csv"
+
+# 支援的圖片副檔名
+IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp', '.tiff')
+
+# ================= 功能函數 =================
+
+def distribute_images():
+    """將來源資料夾的圖片平均搬移到目標資料夾"""
+    print("--- 步驟 1：開始檢查並搬移圖片 ---")
+    for t_dir in target_dirs:
+        os.makedirs(t_dir, exist_ok=True)
+
+    all_images = []
+    for s_dir in source_dirs:
+        if os.path.exists(s_dir):
+            for file in os.listdir(s_dir):
+                if file.lower().endswith(IMAGE_EXTENSIONS):
+                    all_images.append(os.path.join(s_dir, file))
+
+    total_images = len(all_images)
+    if total_images == 0:
+        print("來源資料夾沒有找到圖片 (可能已經搬移完畢)。直接進入 CSV 分割步驟。")
+        return
+
+    print(f"總共找到 {total_images} 張圖片準備搬移...")
+    num_targets = len(target_dirs)
+    
+    for i, img_path in enumerate(all_images):
+        target_index = i % num_targets
+        target_folder = target_dirs[target_index]
+        file_name = os.path.basename(img_path)
+        dest_path = os.path.join(target_folder, file_name)
+        
+        # 避免檔名重複的保護機制
+        if os.path.exists(dest_path):
+            base, ext = os.path.splitext(file_name)
+            counter = 1
+            while os.path.exists(dest_path):
+                dest_path = os.path.join(target_folder, f"{base}_{counter}{ext}")
+                counter += 1
+
+        shutil.move(img_path, dest_path)
+    print("圖片平均分配完畢！\n")
+
+
+def generate_train_test_csvs():
+    """依照各 site 的圖片，從總表抓出對應資料列，並平分成 train.csv 和 test.csv"""
+    print("--- 步驟 2：開始產生各站點的 train.csv 與 test.csv ---")
+    
+    if not os.path.exists(MASTER_CSV):
+        print(f"錯誤：找不到總表 CSV 檔案 -> {MASTER_CSV}")
+        return
+
+    master_data = {}
+    header = []
+
+    # 1. 讀取總表到記憶體
+    # PADCHEST 檔名可能包含 UTF-8 以外的字元，加入 errors='ignore' 防錯
+    with open(MASTER_CSV, 'r', encoding='utf-8', errors='ignore') as f:
+        reader = csv.reader(f)
+        header = next(reader)
+        
+        # 尋找檔名相關欄位的 Index (優先比對 ImageID, ImageDir, Image Index, filename)
+        col_index = 0
+        possible_cols = ['ImageID', 'ImageDir', 'Image Index', 'filename', 'file_name']
+        for i, col in enumerate(header):
+            if col.strip() in possible_cols:
+                col_index = i
+                break
+        print(f"使用第 {col_index + 1} 欄 ('{header[col_index]}') 作為圖片檔名比對依據")
+
+        for row in reader:
+            if row and len(row) > col_index:
+                raw_filename = row[col_index]
+                # 僅取純檔名（移除可能存在的相對路徑，如 "0/1234.png" -> "1234.png"）
+                clean_filename = os.path.basename(raw_filename).strip()
+                master_data[clean_filename] = row
+
+    print(f"已成功讀取總表 (共 {len(master_data)} 筆索引)，開始分配 CSV...")
+
+    # 2. 走訪每個 site 的 images 資料夾
+    for target_images_dir in target_dirs:
+        site_root_dir = os.path.dirname(target_images_dir)
+        site_name = os.path.basename(site_root_dir)
+        
+        if not os.path.exists(target_images_dir):
+            print(f"找不到資料夾 {target_images_dir}，跳過。")
+            continue
+            
+        images_in_site = [f for f in os.listdir(target_images_dir) if f.lower().endswith(IMAGE_EXTENSIONS)]
+        
+        site_csv_rows = []
+        missing_count = 0
+        
+        for img in images_in_site:
+            # 去除可能因為防重複命名產生的底線後綴 (例如: "001_1.jpg" 還原為 "001.jpg" 進行比對)
+            base_name = img
+            if img not in master_data and '_' in img:
+                name, ext = os.path.splitext(img)
+                parts = name.split('_')
+                if parts[-1].isdigit():
+                    base_name = "_".join(parts[:-1]) + ext
+
+            if img in master_data:
+                site_csv_rows.append(master_data[img])
+            elif base_name in master_data:
+                site_csv_rows.append(master_data[base_name])
+            else:
+                missing_count += 1
+
+        if missing_count > 0:
+            print(f"警告：[{site_name}] 有 {missing_count} 張圖片在總表中找不到標籤！")
+
+        # 3. 打亂並分流
+        random.shuffle(site_csv_rows)
+        mid_point = len(site_csv_rows) // 2
+        
+        train_rows = site_csv_rows[:mid_point]
+        test_rows = site_csv_rows[mid_point:]
+        
+        # 4. 輸出 train.csv
+        train_csv_path = os.path.join(site_root_dir, 'train.csv')
+        with open(train_csv_path, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(header)
+            writer.writerows(train_rows)
+            
+        # 5. 輸出 test.csv
+        test_csv_path = os.path.join(site_root_dir, 'test.csv')
+        with open(test_csv_path, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(header)
+            writer.writerows(test_rows)
+            
+        print(f"[{site_name}] 完成！總圖片: {len(images_in_site)} | train: {len(train_rows)} 筆, test: {len(test_rows)} 筆")
+
+    print("\n所有 CSV 檔案建立完畢！")
+
+def main():
+    distribute_images()
+    generate_train_test_csvs()
+
+if __name__ == "__main__":
+    main()
