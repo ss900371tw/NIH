@@ -139,52 +139,65 @@ def prepare_vqa_dataset(csv_path, image_root, num, is_train=True, current_seed=N
         final_abnormal = df_abnormal.sample(n=n_abnormal_target, random_state=seed) if n_abnormal_target > 0 else pd.DataFrame()
         df_balanced = pd.concat([final_healthy, final_abnormal]).sample(frac=1, random_state=seed).reset_index(drop=True)
     else:
-        # 🏋️ 訓練集：使用動態策略
+        # 🏋️ 訓練集：使用稀有疾病優先的多疾病與單一疾病分層抽樣
         print(f"\n🏋️ [訓練集 - 動態抽樣] 使用 Seed: {sampling_seed}")
         guaranteed_abnormal_indices = set()
         disease_labels = [l for l in target_labels if l in df.columns and l != "No_Finding"]
 
-        # 計算每筆資料包含的疾病總數量
         df_abnormal = df_abnormal.copy()
         df_abnormal['disease_count'] = df_abnormal[disease_labels].sum(axis=1)
 
-        # 1. 切分多疾病群 (>=2) 與 單一疾病群 (=1)
-        df_multi = df_abnormal[df_abnormal['disease_count'] >= 2]
+        # 1. 區分為多疾病群 (疾病數 > 1) 與 單一疾病群 (疾病數 = 1)
+        df_multi = df_abnormal[df_abnormal['disease_count'] > 1]
         df_single = df_abnormal[df_abnormal['disease_count'] == 1]
 
-        # 2. 從多疾病群中，依疾病數量由少到多依序抽取 (2, 3, 4...)
-        if not df_multi.empty:
-            unique_counts = sorted(df_multi['disease_count'].unique())
-            print(f"🌊 [多疾病群] 發現疾病數量階層: {unique_counts}")
-            
-            for count in unique_counts:
-                still_needed = n_abnormal_target - len(guaranteed_abnormal_indices)
-                if still_needed <= 0:
-                    break
-                
-                df_curr_level = df_multi[df_multi['disease_count'] == count]
-                level_size = len(df_curr_level)
-                
-                if level_size <= still_needed:
-                    # 該階層數量小於等於所需名額 -> 全抽
-                    guaranteed_abnormal_indices.update(df_curr_level.index.tolist())
-                    print(f"  └ 疾病數 = {count}: 全抽 {level_size} 筆")
-                else:
-                    # 該階層數量超過所需名額 -> 用 sampling_seed 隨機抽樣補滿
-                    sampled = df_curr_level.sample(n=still_needed, random_state=sampling_seed)
-                    guaranteed_abnormal_indices.update(sampled.index.tolist())
-                    print(f"  └ 疾病數 = {count}: 隨機抽取 {still_needed} / {level_size} 筆 (已滿足多標籤需求)")
-                    break
+        # 2. 多疾病群：動態尋找「當前最少量的疾病標籤」並優先抽取
+        print("🌊 [多疾病群] 開始依疾病稀有度由少到多動態提取...")
+        while True:
+            still_needed = n_abnormal_target - len(guaranteed_abnormal_indices)
+            if still_needed <= 0:
+                break
 
-        # 3. 若多疾病群抽完還沒滿足目標數量，從單一疾病群隨機抽取
+            # 取得多疾病群中尚未被抽取的剩餘池
+            df_multi_remaining = df_multi[~df_multi.index.isin(guaranteed_abnormal_indices)]
+            if df_multi_remaining.empty:
+                print("  └ 多疾病群已全部抽取完畢。")
+                break
+
+            # 統計剩餘多疾病池中，各疾病標籤出現的陽性總數
+            class_counts = {l: (df_multi_remaining[l] == 1).sum() for l in disease_labels}
+            class_counts = {k: v for k, v in class_counts.items() if v > 0}
+
+            if not class_counts:
+                break
+
+            # 找出出現次數最少（最稀有）的疾病標籤
+            min_label = min(class_counts, key=class_counts.get)
+            df_min_label_samples = df_multi_remaining[df_multi_remaining[min_label] == 1]
+            available_count = len(df_min_label_samples)
+
+            if available_count <= still_needed:
+                # 該稀有疾病的多疾病樣本數 <= 剩餘名額 -> 全抽
+                guaranteed_abnormal_indices.update(df_min_label_samples.index.tolist())
+                print(f"  └ 稀有標籤 [{min_label}] (剩餘 {available_count} 筆) -> 全抽，累積異常: {len(guaranteed_abnormal_indices)}/{n_abnormal_target}")
+            else:
+                # 該稀有疾病的多疾病樣本數 > 剩餘名額 -> 隨機抽樣補滿並結束
+                sampled = df_min_label_samples.sample(n=still_needed, random_state=sampling_seed)
+                guaranteed_abnormal_indices.update(sampled.index.tolist())
+                print(f"  └ 稀有標籤 [{min_label}] (剩餘 {available_count} 筆) -> 隨機抽取 {still_needed} 筆補滿，達目標額度")
+                break
+
+        # 3. 若多疾病群抽完仍未達到目標數量，從單一疾病群隨機補足
         still_needed = n_abnormal_target - len(guaranteed_abnormal_indices)
         if still_needed > 0 and not df_single.empty:
-            draw_num = min(still_needed, len(df_single))
-            sampled_single = df_single.sample(n=draw_num, random_state=sampling_seed)
-            guaranteed_abnormal_indices.update(sampled_single.index.tolist())
-            print(f"🍂 [單一疾病群] 補足抽取 {draw_num} / {len(df_single)} 筆")
+            df_single_remaining = df_single[~df_single.index.isin(guaranteed_abnormal_indices)]
+            if not df_single_remaining.empty:
+                draw_num = min(still_needed, len(df_single_remaining))
+                sampled_single = df_single_remaining.sample(n=draw_num, random_state=sampling_seed)
+                guaranteed_abnormal_indices.update(sampled_single.index.tolist())
+                print(f"🍂 [單一疾病群] 多疾病群不足，隨機補充 {draw_num} / {len(df_single_remaining)} 筆")
 
-        # 4. 萬一兩群抽完仍有極少許缺口（例如全部都沒有標註），用剩餘備用資料補齊
+        # 4. 備用機制：若極端情況下仍有名額缺口，從剩餘所有異常樣本中補齊
         still_needed = n_abnormal_target - len(guaranteed_abnormal_indices)
         if still_needed > 0:
             df_remaining = df_abnormal[~df_abnormal.index.isin(guaranteed_abnormal_indices)]
@@ -194,7 +207,7 @@ def prepare_vqa_dataset(csv_path, image_root, num, is_train=True, current_seed=N
 
         final_abnormal = df_abnormal.loc[list(guaranteed_abnormal_indices)]
 
-        # 5. 合併健康組並打亂
+        # 5. 抽取健康組並打亂
         if n_healthy_target > 0 and len(df_healthy) > 0:
             final_healthy = df_healthy.sample(n=n_healthy_target, random_state=sampling_seed)
             df_balanced = pd.concat([final_abnormal, final_healthy]).sample(frac=1, random_state=sampling_seed).reset_index(drop=True)
@@ -292,7 +305,6 @@ def prepare_vqa_dataset(csv_path, image_root, num, is_train=True, current_seed=N
 
     print(f"✅ 成功載入 {len(converted_data)} 筆有效 Vision-VQA 樣本。")
     return converted_data
-
 
 def train_local(model, processor, train_dataset, epochs=1):
     if not train_dataset:
