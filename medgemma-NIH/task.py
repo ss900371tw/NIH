@@ -139,7 +139,7 @@ def prepare_vqa_dataset(csv_path, image_root, num, is_train=True, current_seed=N
         final_abnormal = df_abnormal.sample(n=n_abnormal_target, random_state=seed) if n_abnormal_target > 0 else pd.DataFrame()
         df_balanced = pd.concat([final_healthy, final_abnormal]).sample(frac=1, random_state=seed).reset_index(drop=True)
     else:
-        # 🏋️ 訓練集：使用稀有疾病優先的多疾病與單一疾病分層抽樣
+        # 🏋️ 訓練集：使用稀有疾病優先的多疾病與單一疾病分層抽樣（含小於 100 筆全域放寬條件）
         print(f"\n🏋️ [訓練集 - 動態抽樣] 使用 Seed: {sampling_seed}")
         guaranteed_abnormal_indices = set()
         disease_labels = [l for l in target_labels if l in df.columns and l != "No_Finding"]
@@ -151,7 +151,7 @@ def prepare_vqa_dataset(csv_path, image_root, num, is_train=True, current_seed=N
         df_multi = df_abnormal[df_abnormal['disease_count'] > 1]
         df_single = df_abnormal[df_abnormal['disease_count'] == 1]
 
-        # 2. 多疾病群：動態尋找「當前最少量的疾病標籤」並優先抽取
+        # 2. 多疾病群提取：動態尋找「當前最少量的疾病標籤」
         print("🌊 [多疾病群] 開始依疾病稀有度由少到多動態提取...")
         while True:
             still_needed = n_abnormal_target - len(guaranteed_abnormal_indices)
@@ -165,29 +165,43 @@ def prepare_vqa_dataset(csv_path, image_root, num, is_train=True, current_seed=N
                 break
 
             # 統計剩餘多疾病池中，各疾病標籤出現的陽性總數
-            class_counts = {l: (df_multi_remaining[l] == 1).sum() for l in disease_labels}
-            class_counts = {k: v for k, v in class_counts.items() if v > 0}
+            class_counts_multi = {l: (df_multi_remaining[l] == 1).sum() for l in disease_labels}
+            class_counts_multi = {k: v for k, v in class_counts_multi.items() if v > 0}
 
-            if not class_counts:
+            if not class_counts_multi:
                 break
 
-            # 找出出現次數最少（最稀有）的疾病標籤
-            min_label = min(class_counts, key=class_counts.get)
-            df_min_label_samples = df_multi_remaining[df_multi_remaining[min_label] == 1]
+            # 找出多疾病池中出現次數最少（最稀有）的疾病標籤
+            min_label = min(class_counts_multi, key=class_counts_multi.get)
+            min_label_multi_count = class_counts_multi[min_label]
+
+            # 🌟 特殊條件判斷：若多疾病群中該疾病數量 < 100 筆，改從全體異常資料中抽取；否則僅從多疾病群抽取
+            if min_label_multi_count < 100:
+                df_pool = df_abnormal[~df_abnormal.index.isin(guaranteed_abnormal_indices)]
+                pool_type_str = "全體異常資料 (多疾病+單一疾病)"
+            else:
+                df_pool = df_multi_remaining
+                pool_type_str = "多疾病群"
+
+            df_min_label_samples = df_pool[df_pool[min_label] == 1]
             available_count = len(df_min_label_samples)
 
+            if available_count == 0:
+                # 預防萬一該疾病在該 pool 已無可抽取樣本，避免無窮迴圈
+                continue
+
             if available_count <= still_needed:
-                # 該稀有疾病的多疾病樣本數 <= 剩餘名額 -> 全抽
+                # 該稀有疾病樣本數 <= 剩餘名額 -> 全抽
                 guaranteed_abnormal_indices.update(df_min_label_samples.index.tolist())
-                print(f"  └ 稀有標籤 [{min_label}] (剩餘 {available_count} 筆) -> 全抽，累積異常: {len(guaranteed_abnormal_indices)}/{n_abnormal_target}")
+                print(f"  └ 稀有標籤 [{min_label}] (多疾病數={min_label_multi_count} < 100 -> 來源: {pool_type_str}, 可用 {available_count} 筆) -> 全抽，累積異常: {len(guaranteed_abnormal_indices)}/{n_abnormal_target}")
             else:
-                # 該稀有疾病的多疾病樣本數 > 剩餘名額 -> 隨機抽樣補滿並結束
+                # 該稀有疾病樣本數 > 剩餘名額 -> 隨機抽樣補滿並結束
                 sampled = df_min_label_samples.sample(n=still_needed, random_state=sampling_seed)
                 guaranteed_abnormal_indices.update(sampled.index.tolist())
-                print(f"  └ 稀有標籤 [{min_label}] (剩餘 {available_count} 筆) -> 隨機抽取 {still_needed} 筆補滿，達目標額度")
+                print(f"  └ 稀有標籤 [{min_label}] (來源: {pool_type_str}, 可用 {available_count} 筆) -> 隨機抽取 {still_needed} 筆補滿，達目標額度")
                 break
 
-        # 3. 若多疾病群抽完仍未達到目標數量，從單一疾病群隨機補足
+        # 3. 若多疾病抽取完成後仍未達到目標數量，從單一疾病群隨機補足
         still_needed = n_abnormal_target - len(guaranteed_abnormal_indices)
         if still_needed > 0 and not df_single.empty:
             df_single_remaining = df_single[~df_single.index.isin(guaranteed_abnormal_indices)]
