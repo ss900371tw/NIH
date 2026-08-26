@@ -295,6 +295,6 @@ def server_fn(context: Context):
         on_evaluate_config_fn=lambda sr: {"server_round": sr},
     )
 
-    return ServerAppComponents(strategy=strategy, config=ServerConfig(num_rounds=num_rounds))
+    return ServerAppComponents(strategy=strategy, config=ServerConfig(num_rounds=num_rounds,round_timeout=86400.0))
 
 app = ServerApp(server_fn=server_fn)
