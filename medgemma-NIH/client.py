@@ -132,6 +132,9 @@ SITE_PATHS_MAPPING = {
     "site-2": "/opt/toolkit/NIH/site-2/",
     "site-3": "/opt/toolkit/NIH/site-3/",
     "site-4": "/opt/toolkit/NIH/site-4/",
+    "site-5": "/opt/toolkit/PADCHEST/site-1/",
+    "site-6": "/opt/toolkit/PADCHEST/site-2/",
+    "site-7": "/opt/toolkit/PADCHEST/site-3/",
 }
 
 current_cached_site = None 
